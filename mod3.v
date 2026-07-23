@@ -3,6 +3,7 @@ module main
 import gg
 import rand
 import time
+import os
 
 // Increase Sokol Gfx pool limits globally before headers compile
 #flag -DSG_DEFAULT_SAMPLER_POOL_SIZE=256
@@ -12,7 +13,7 @@ import time
 const default_card_width  = 500
 const default_card_height = 726
 
-// Scale down factor for rendering so 500x726 fits comfortably on screen (e.g. scale factor ~0.16)
+// Scale down factor for rendering so 500x726 fits comfortably on screen
 const render_scale = 0.16
 
 const card_width  = int(default_card_width * render_scale)
@@ -77,6 +78,7 @@ mut:
 	selected_r    int = -1
 	selected_c    int = -1
 	message       string = 'Click a card to select, then click a target slot.'
+	is_muted      bool
 	
 	// Card texture assets map: key = "2_of_clubs", value = gg.Image
 	card_images   map[string]gg.Image
@@ -86,8 +88,7 @@ mut:
 
 fn main() {
 	mut app := &App{}
-	app.new_game()
-
+	
 	app.gg = gg.new_context(
 		bg_color: gg.rgb(34, 112, 62)
 		width: default_width
@@ -99,6 +100,29 @@ fn main() {
 		user_data: app
 	)
 	app.gg.run()
+}
+
+// Play sound effect helper function, with an optional delay to stagger multi-card sounds
+fn play_flip_sound_delayed(delay_ms int, muted bool) {
+	if muted {
+		return
+	}
+	spawn fn (d int) {
+		if d > 0 {
+			time.sleep(time.millisecond * i64(d))
+		}
+		sound_path := 'sounds/card_flip.m4a'
+		if !os.exists(sound_path) {
+			return
+		}
+		$if macos {
+			os.execute('afplay "${sound_path}"')
+		} $else $if windows {
+			os.execute('powershell -c "(New-Object Media.SoundPlayer \\"${sound_path}\\").PlaySync();"')
+		} $else {
+			os.execute('aplay "${sound_path}" || mpg123 "${sound_path}" || ffplay -nodisp -autoexit "${sound_path}"')
+		}
+	}(delay_ms)
 }
 
 // Convert card rank integer and Suit enum into filename stem
@@ -120,7 +144,7 @@ fn card_texture_key(rank int, suit Suit) string {
 	return '${rank_str}_of_${suit_str}'
 }
 
-// Startup initialization: load card back & face PNG textures once
+// Startup initialization: load card back & face PNG textures once, then start game
 fn init_app(mut app App) {
 	// Load card back image once from PNG-cards-1.3 folder
 	if img := app.gg.create_image('PNG-cards-1.3/card_back.png') {
@@ -143,9 +167,11 @@ fn init_app(mut app App) {
 			}
 		}
 	}
+
+	app.new_game()
 }
 
-// Initialize 2 decks, remove all Aces, and deal starting board
+// Initialize 2 decks, remove all Aces, and deal starting board with animation from talon
 fn (mut app App) new_game() {
 	app.deck.clear()
 	app.undo_stack.clear()
@@ -175,12 +201,30 @@ fn (mut app App) new_game() {
 
 	rand.shuffle(mut app.deck) or {}
 
+	// Create temporary full stack to animate deals from talon
+	mut temp_deck := app.deck.clone()
+	app.deck.clear()
+
+	mut delay_offset := f32(0.0)
 	for i in 0 .. 32 {
-		if app.deck.len > 0 {
-			card := app.deck.pop()
+		if temp_deck.len > 0 {
+			card := temp_deck.pop()
 			app.grid[i] << card
+
+			r := i / cols
+			c := i % cols
+
+			// Only trigger animations if graphics context exists
+			if !isnil(app.gg) {
+				play_flip_sound_delayed(int(delay_offset), app.is_muted)
+				app.animate_deal_from_talon(card, r, c, delay_offset)
+			}
+			delay_offset += 45.0
 		}
 	}
+
+	// Whatever remains stays in the deck/talon
+	app.deck = temp_deck
 }
 
 // Helper to get current dynamic scale factor based on window dimensions
@@ -218,7 +262,7 @@ fn (mut app App) animate_card_move(card Card, start_px f32, start_py f32, target
 		end_x: target_x
 		end_y: target_y
 		start_time: now + i64(delay_ms)
-		duration: 200.0
+		duration: 400.0 // Slower animation duration (50% slower than 200.0)
 		target_r: target_r
 		target_c: target_c
 	}
@@ -301,19 +345,20 @@ fn frame(mut app App) {
 	labels := [
 		'Row 1 Target: 2 - 5 - 8 - J',
 		'Row 2 Target: 3 - 6 - 9 - Q',
-		'Row 3 Target: 4 - 7 - 10 - K',
-		'Row 4: Waste / Free Slots'
+		'Row 3 Target: 4 - 7 - 10 - K'
 	]
 
 	// Render Grid (4 Rows x 8 Columns)
 	for r in 0 .. 4 {
 		row_y := start_y_f + f32(r) * (card_h + card_m + 35.0 * scale)
 
-		app.gg.draw_text(int(start_x_f), int(row_y - 15.0 * scale), labels[r], gg.TextCfg{
-			color: gg.rgb(210, 240, 210)
-			size: int(11.0 * scale)
-			bold: true
-		})
+		if r < 3 {
+			app.gg.draw_text(int(start_x_f), int(row_y - 15.0 * scale), labels[r], gg.TextCfg{
+				color: gg.rgb(210, 240, 210)
+				size: int(11.0 * scale)
+				bold: true
+			})
+		}
 
 		for c in 0 .. cols {
 			base_x := start_x_f + f32(c) * (card_w + card_m)
@@ -328,7 +373,7 @@ fn frame(mut app App) {
 				mut is_animating := false
 				if is_top {
 					for anim in app.animations {
-						if anim.target_r == r && anim.target_c == c && now >= anim.start_time {
+						if anim.target_r == r && anim.target_c == c && now < anim.start_time + i64(anim.duration) {
 							is_animating = true
 							break
 						}
@@ -363,6 +408,14 @@ fn frame(mut app App) {
 	app.gg.draw_rect_filled(side_x, undo_y, card_w, btn_h, undo_btn_color)
 	app.gg.draw_rect_empty(side_x, undo_y, card_w, btn_h, gg.white)
 	app.gg.draw_text(int(side_x + 14.0 * scale), int(undo_y + 10.0 * scale), 'UNDO', gg.TextCfg{ color: gg.white, size: int(10.0 * scale), bold: true })
+
+	// Mute Button
+	mute_y := undo_y + 45.0 * scale
+	mute_btn_color := if app.is_muted { gg.rgb(150, 60, 60) } else { gg.rgb(60, 120, 90) }
+	mute_label := if app.is_muted { 'UNMUTE' } else { 'MUTE' }
+	app.gg.draw_rect_filled(side_x, mute_y, card_w, btn_h, mute_btn_color)
+	app.gg.draw_rect_empty(side_x, mute_y, card_w, btn_h, gg.white)
+	app.gg.draw_text(int(side_x + 10.0 * scale), int(mute_y + 10.0 * scale), mute_label, gg.TextCfg{ color: gg.white, size: int(10.0 * scale), bold: true })
 
 	// Talon Deck
 	talon_y := start_y_f + 3.0 * (card_h + card_m + 35.0 * scale)
@@ -503,14 +556,22 @@ fn on_click(x f32, y f32, button gg.MouseButton, mut app App) {
 		return
 	}
 
-	// 3. Click Talon
+	// 3. Click Mute Button
+	mute_y := undo_y + 45.0 * scale
+	if x >= side_x && x <= side_x + card_w && y >= mute_y && y <= mute_y + btn_h {
+		app.is_muted = !app.is_muted
+		app.message = if app.is_muted { 'Audio muted.' } else { 'Audio unmuted.' }
+		return
+	}
+
+	// 4. Click Talon
 	talon_y := start_y_f + 3.0 * (card_h + card_m + 35.0 * scale)
 	if x >= side_x && x <= side_x + card_w && y >= talon_y && y <= talon_y + card_h {
 		app.deal_from_talon()
 		return
 	}
 
-	// 4. Click Grid Cards
+	// 5. Click Grid Cards
 	for r in 0 .. 4 {
 		row_y := start_y_f + f32(r) * (card_h + card_m + 35.0 * scale)
 
@@ -574,6 +635,7 @@ fn (mut app App) handle_grid_click(r int, c int) {
 		app.move_count++
 		app.message = 'Moved card successfully.'
 
+		play_flip_sound_delayed(0, app.is_muted)
 		app.animate_card_move(moved_card, start_px, start_py, r, c, 0)
 		app.fill_empty_row4_slots()
 		app.check_win_condition()
@@ -593,8 +655,9 @@ fn (mut app App) fill_empty_row4_slots() {
 			card := app.deck.pop()
 			app.grid[slot_idx] << card
 			
+			play_flip_sound_delayed(int(delay_offset), app.is_muted)
 			app.animate_deal_from_talon(card, 3, c, delay_offset)
-			delay_offset += 60.0
+			delay_offset += 75.0
 
 			app.message += ' Auto-filled Row 4 slot from Talon.'
 		}
@@ -671,8 +734,9 @@ fn (mut app App) deal_from_talon() {
 			card := app.deck.pop()
 			app.grid[slot_idx] << card
 
+			play_flip_sound_delayed(int(delay_offset), app.is_muted)
 			app.animate_deal_from_talon(card, 3, c, delay_offset)
-			delay_offset += 50.0
+			delay_offset += 75.0
 
 			dealt++
 		}
