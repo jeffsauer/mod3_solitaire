@@ -77,9 +77,14 @@ mut:
 	is_won        bool
 	selected_r    int = -1
 	selected_c    int = -1
-	message       string = 'Click a card to select, then click a target slot.'
+	message       string = 'Click a card to select, then click a target slot. Double-click to auto-play!'
 	is_muted      bool
 	
+	// Double-click tracking state
+	last_click_time i64
+	last_click_r    int = -1
+	last_click_c    int = -1
+
 	// Card texture assets map: key = "2_of_clubs", value = gg.Image
 	card_images   map[string]gg.Image
 	card_back_img gg.Image
@@ -146,7 +151,6 @@ fn card_texture_key(rank int, suit Suit) string {
 
 // Startup initialization: load card back & face PNG textures once, then start game
 fn init_app(mut app App) {
-	// Load card back image once from PNG-cards-1.3 folder
 	if img := app.gg.create_image('PNG-cards-1.3/card_back.png') {
 		app.card_back_img = img
 		app.has_card_back = true
@@ -154,7 +158,6 @@ fn init_app(mut app App) {
 		println('Warning: Could not load card_back.png from PNG-cards-1.3/')
 	}
 
-	// Pre-load all face card textures from PNG folder (ranks 2 through 13 across all 4 suits)
 	suits := [Suit.hearts, Suit.diamonds, Suit.clubs, Suit.spades]
 	for s in suits {
 		for r in 2 .. 14 {
@@ -171,7 +174,6 @@ fn init_app(mut app App) {
 	app.new_game()
 }
 
-// Initialize 2 decks, remove all Aces, and deal starting board with animation from talon
 fn (mut app App) new_game() {
 	app.deck.clear()
 	app.undo_stack.clear()
@@ -201,7 +203,6 @@ fn (mut app App) new_game() {
 
 	rand.shuffle(mut app.deck) or {}
 
-	// Create temporary full stack to animate deals from talon
 	mut temp_deck := app.deck.clone()
 	app.deck.clear()
 
@@ -214,7 +215,6 @@ fn (mut app App) new_game() {
 			r := i / cols
 			c := i % cols
 
-			// Only trigger animations if graphics context exists
 			if !isnil(app.gg) {
 				play_flip_sound_delayed(int(delay_offset), app.is_muted)
 				app.animate_deal_from_talon(card, r, c, delay_offset)
@@ -223,11 +223,9 @@ fn (mut app App) new_game() {
 		}
 	}
 
-	// Whatever remains stays in the deck/talon
 	app.deck = temp_deck
 }
 
-// Helper to get current dynamic scale factor based on window dimensions
 fn get_scale(ctx &gg.Context) f32 {
 	scale_w := f32(ctx.width) / f32(default_width)
 	scale_h := f32(ctx.height) / f32(default_height)
@@ -262,7 +260,7 @@ fn (mut app App) animate_card_move(card Card, start_px f32, start_py f32, target
 		end_x: target_x
 		end_y: target_y
 		start_time: now + i64(delay_ms)
-		duration: 400.0 // Slower animation duration (50% slower than 200.0)
+		duration: 400.0
 		target_r: target_r
 		target_c: target_c
 	}
@@ -509,7 +507,6 @@ fn draw_procedural_card_back(ctx &gg.Context, x int, y int, w int, h int) {
 	}
 }
 
-// Render card using PNG face texture with scalable width/height
 fn draw_card(mut app App, x int, y int, w f32, h f32, card Card, selected bool) {
 	key := card_texture_key(card.rank, card.suit)
 
@@ -591,9 +588,101 @@ fn on_click(x f32, y f32, button gg.MouseButton, mut app App) {
 	}
 }
 
+// Strictly evaluate Mod3 move rules ensuring correct base cards and prior sequence steps
+fn (app App) is_valid_move(card Card, to_r int, to_c int) bool {
+	dest_idx := to_r * cols + to_c
+	dest_pile := app.grid[dest_idx]
+
+	// Row 4 (index 3) is Waste / Free slots: accepts ANY single card into an empty slot
+	if to_r == 3 {
+		return dest_pile.len == 0
+	}
+
+	// Rows 1-3 (indices 0-2) strictly hold sequences of length 4 max
+	if dest_pile.len >= 4 {
+		return false
+	}
+
+	// If the slot is empty, it can only accept the base card for this row:
+	// Row 1 (to_r = 0) -> 2
+	// Row 2 (to_r = 1) -> 3
+	// Row 3 (to_r = 2) -> 4
+	if dest_pile.len == 0 {
+		return card.rank == (2 + to_r)
+	}
+
+	// Calculate expected rank for current depth in sequence
+	expected_rank := 2 + to_r + (dest_pile.len * 3)
+	if card.rank != expected_rank {
+		return false
+	}
+
+	// The existing pile must have the correct previous card rank in the sequence and matching suit
+	expected_prev_rank := 2 + to_r + ((dest_pile.len - 1) * 3)
+	top_card := dest_pile.last()
+
+	if top_card.rank != expected_prev_rank || top_card.suit != card.suit {
+		return false
+	}
+
+	return true
+}
+
+// Auto-target finding logic strictly matching Mod3 sequence rules
+fn (app App) find_auto_target(card Card, src_r int, src_c int) (int, int) {
+	// First check target sequence building rows (Rows 0, 1, and 2)
+	for tr in 0 .. 3 {
+		for tc in 0 .. cols {
+			if tr == src_r && tc == src_c {
+				continue
+			}
+			if app.is_valid_move(card, tr, tc) {
+				return tr, tc
+			}
+		}
+	}
+
+	// If the card is in a target row but blocked, allow auto-moving to Row 4 empty slot
+	if src_r < 3 {
+		for tc in 0 .. cols {
+			if 3 == src_r && tc == src_c {
+				continue
+			}
+			if app.is_valid_move(card, 3, tc) {
+				return 3, tc
+			}
+		}
+	}
+
+	return -1, -1
+}
+
 fn (mut app App) handle_grid_click(r int, c int) {
 	slot_idx := r * cols + c
 
+	now := time.ticks()
+	is_double_click := (app.last_click_r == r && app.last_click_c == c && (now - app.last_click_time) < 350)
+
+	app.last_click_time = now
+	app.last_click_r = r
+	app.last_click_c = c
+
+	// Handle Double-Click Auto Play
+	if is_double_click && app.grid[slot_idx].len > 0 {
+		card := app.grid[slot_idx].last()
+		target_r, target_c := app.find_auto_target(card, r, c)
+
+		if target_r != -1 && target_c != -1 {
+			app.execute_move(r, c, target_r, target_c)
+			app.selected_r = -1
+			app.selected_c = -1
+			return
+		} else {
+			app.message = 'No valid Mod3 sequence target available for this card.'
+		}
+	}
+
+	// Standard Selection & Movement Rules
 	if app.selected_r == -1 {
 		if app.grid[slot_idx].len > 0 {
 			app.selected_r = r
@@ -614,37 +703,46 @@ fn (mut app App) handle_grid_click(r int, c int) {
 	from_r := app.selected_r
 	from_c := app.selected_c
 	from_idx := from_r * cols + from_c
-	card := app.grid[from_idx].last()
 
-	if app.is_valid_move(card, r, c) {
-		app.save_undo_state()
-
-		scale := get_scale(app.gg)
-		card_w := f32(card_width) * scale
-		card_h := f32(card_height) * scale
-		card_m := f32(card_margin) * scale
-		start_x_f := f32(start_x) * scale
-		start_y_f := f32(start_y) * scale
-
-		start_px := start_x_f + f32(from_c) * (card_w + card_m)
-		from_pile_len := app.grid[from_idx].len - 1
-		start_py := start_y_f + f32(from_r) * (card_h + card_m + 35.0 * scale) + (f32(from_pile_len) * (f32(stack_offset_y) * scale))
-
-		moved_card := app.grid[from_idx].pop()
-		app.grid[slot_idx] << moved_card
-		app.move_count++
-		app.message = 'Moved card successfully.'
-
-		play_flip_sound_delayed(0, app.is_muted)
-		app.animate_card_move(moved_card, start_px, start_py, r, c, 0)
-		app.fill_empty_row4_slots()
-		app.check_win_condition()
-	} else {
-		app.message = 'Invalid move according to Mod3-style sequence rules!'
+	if app.grid[from_idx].len > 0 {
+		card := app.grid[from_idx].last()
+		if app.is_valid_move(card, r, c) {
+			app.execute_move(from_r, from_c, r, c)
+		} else {
+			app.message = 'Invalid move according to Mod3-style sequence rules!'
+		}
 	}
 
 	app.selected_r = -1
 	app.selected_c = -1
+}
+
+fn (mut app App) execute_move(from_r int, from_c int, to_r int, to_c int) {
+	from_idx := from_r * cols + from_c
+	to_idx := to_r * cols + to_c
+
+	app.save_undo_state()
+
+	scale := get_scale(app.gg)
+	card_w := f32(card_width) * scale
+	card_h := f32(card_height) * scale
+	card_m := f32(card_margin) * scale
+	start_x_f := f32(start_x) * scale
+	start_y_f := f32(start_y) * scale
+
+	start_px := start_x_f + f32(from_c) * (card_w + card_m)
+	from_pile_len := app.grid[from_idx].len - 1
+	start_py := start_y_f + f32(from_r) * (card_h + card_m + 35.0 * scale) + (f32(from_pile_len) * (f32(stack_offset_y) * scale))
+
+	moved_card := app.grid[from_idx].pop()
+	app.grid[to_idx] << moved_card
+	app.move_count++
+	app.message = 'Moved card successfully.'
+
+	play_flip_sound_delayed(0, app.is_muted)
+	app.animate_card_move(moved_card, start_px, start_py, to_r, to_c, 0)
+	app.fill_empty_row4_slots()
+	app.check_win_condition()
 }
 
 fn (mut app App) fill_empty_row4_slots() {
@@ -687,34 +785,6 @@ fn (mut app App) check_win_condition() {
 
 	app.is_won = true
 	app.message = 'YOU WIN! All target sequences are complete!'
-}
-
-fn (app App) is_valid_move(card Card, to_r int, to_c int) bool {
-	dest_idx := to_r * cols + to_c
-	dest_pile := app.grid[dest_idx]
-
-	if to_r == 3 {
-		return dest_pile.len == 0
-	}
-
-	if dest_pile.len >= 4 {
-		return false
-	}
-
-	expected_rank := 2 + to_r + (dest_pile.len * 3)
-
-	if card.rank != expected_rank {
-		return false
-	}
-
-	if dest_pile.len > 0 {
-		top_card := dest_pile.last()
-		if top_card.suit != card.suit {
-			return false
-		}
-	}
-
-	return true
 }
 
 fn (mut app App) deal_from_talon() {
