@@ -116,7 +116,7 @@ fn play_flip_sound_delayed(delay_ms int, muted bool) {
 		if d > 0 {
 			time.sleep(time.millisecond * i64(d))
 		}
-		sound_path := 'sounds/card_flip.m4a'
+		sound_path := 'sounds/card_flip.wav'
 		if !os.exists(sound_path) {
 			return
 		}
