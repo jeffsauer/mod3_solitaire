@@ -1,5 +1,6 @@
 module main
 
+import sokol.audio
 import gg
 import rand
 import time
@@ -35,6 +36,13 @@ enum Suit {
 	spades
 }
 
+// Context holder to track PCM data stream and concurrent sound voices
+struct WavPlayer {
+mut:
+	samples    []f32
+	active_pos []int
+}
+
 struct Card {
 mut:
 	suit Suit
@@ -61,6 +69,8 @@ struct Animation {
 	duration   f32 // in milliseconds
 	target_r   int
 	target_c   int
+mut:
+	sound_played bool
 }
 
 struct App {
@@ -76,6 +86,7 @@ mut:
 	selected_c int    = -1
 	message    string = 'Click a card to select, then click a target slot. Double-click to auto-play!'
 	is_muted   bool
+	card_flip  ?&WavPlayer
 
 	// Double-click tracking state
 	last_click_time i64
@@ -100,30 +111,8 @@ fn main() {
 		click_fn:     on_click
 		user_data:    app
 	)
-	app.ctx.run()
-}
 
-// Play sound effect helper function, with an optional delay to stagger multi-card sounds
-fn play_flip_sound_delayed(delay_ms int, muted bool) {
-	if muted {
-		return
-	}
-	spawn fn (d int) {
-		if d > 0 {
-			time.sleep(time.millisecond * i64(d))
-		}
-		sound_path := 'sounds/card_flip.wav'
-		if !os.exists(sound_path) {
-			return
-		}
-		$if macos {
-			os.execute('afplay "${sound_path}"')
-		} $else $if windows {
-			os.execute("powershell -c \"(New-Object Media.SoundPlayer \\\"${sound_path}\\\").PlaySync();\"")
-		} $else {
-			os.execute('aplay "${sound_path}" || mpg123 "${sound_path}" || ffplay -nodisp -autoexit "${sound_path}"')
-		}
-	}(delay_ms)
+	app.ctx.run()
 }
 
 // Convert card rank integer and Suit enum into filename stem
@@ -149,7 +138,7 @@ fn card_texture_key(rank int, suit Suit) string {
 fn init_app(mut app App) {
 	app.card_back_img = app.ctx.create_image('PNG-cards-1.3/card_back.png') or {
 		panic('Warning: Could not load card_back.png from PNG-cards-1.3/')
-  }
+	}
 
 	suits := [Suit.hearts, Suit.diamonds, Suit.clubs, Suit.spades]
 	for s in suits {
@@ -161,7 +150,51 @@ fn init_app(mut app App) {
 			}
 		}
 	}
+
+	if player := load_card_flip_sound('sounds/card_flip.wav') {
+		app.card_flip = player
+
+		// Setup audio stream once globally during startup
+		audio.setup(
+			sample_rate:        44100
+			num_channels:       2
+			stream_userdata_cb: audio_stream_callback
+			user_data:          voidptr(player)
+		)
+	}
+
 	app.new_game()
+}
+
+fn load_card_flip_sound(filepath string) ?&WavPlayer {
+	bytes := os.read_bytes(filepath) or { return none }
+
+	// Extract the raw PCM frames bypassing the 44-byte RIFF header
+	data_offset := 44
+	if bytes.len <= data_offset {
+		return none
+	}
+
+	raw_data := bytes[data_offset..]
+
+	// Normalize 16-bit integer bytes into 32-bit floats (-1.0 to 1.0)
+	mut float_samples := []f32{cap: raw_data.len / 2}
+	for i := 0; i < raw_data.len; i += 2 {
+		if i + 1 >= raw_data.len {
+			break
+		}
+		raw_val := u16(raw_data[i]) | (u16(raw_data[i + 1]) << 8)
+		val := i16(raw_val)
+		float_samples << f32(val) / 32768.0
+	}
+
+	// Allocate memory on heap so background streaming thread can access safely
+	mut player := &WavPlayer{
+		samples:    float_samples
+		active_pos: []int{}
+	}
+
+	return player
 }
 
 fn (mut app App) new_game() {
@@ -204,7 +237,6 @@ fn (mut app App) new_game() {
 			r := i / cols
 			c := i % cols
 
-			play_flip_sound_delayed(int(delay_offset), app.is_muted)
 			app.animate_deal_from_talon(card, r, c, delay_offset)
 			delay_offset += 45.0
 		}
@@ -241,15 +273,16 @@ fn (mut app App) animate_card_move(card Card, start_px f32, start_py f32, target
 
 	now := time.ticks()
 	app.animations << Animation{
-		card:       card
-		start_x:    start_px
-		start_y:    start_py
-		end_x:      target_x
-		end_y:      target_y
-		start_time: now + i64(delay_ms)
-		duration:   400.0
-		target_r:   target_r
-		target_c:   target_c
+		card:         card
+		start_x:      start_px
+		start_y:      start_py
+		end_x:        target_x
+		end_y:        target_y
+		start_time:   now + i64(delay_ms)
+		duration:     400.0
+		target_r:     target_r
+		target_c:     target_c
+		sound_played: false
 	}
 }
 
@@ -296,6 +329,8 @@ fn (mut app App) undo_last_move() {
 	app.message = 'Undo successful.'
 	app.selected_r = -1
 	app.selected_c = -1
+
+  app.play_flip_sound()
 }
 
 fn frame(mut app App) {
@@ -386,7 +421,8 @@ fn frame(mut app App) {
 	btn_h := 35.0 * scale
 	app.ctx.draw_rect_filled(side_x, restart_y, card_w, btn_h, gg.rgb(190, 50, 50))
 	app.ctx.draw_rect_empty(side_x, restart_y, card_w, btn_h, gg.white)
-	app.ctx.draw_text(int(side_x + 6.0 * scale), int(restart_y + 10.0 * scale), 'NEW GAME', gg.TextCfg{
+	app.ctx.draw_text(int(side_x + 6.0 * scale), int(restart_y + 10.0 * scale), 'NEW GAME',
+		gg.TextCfg{
 		color: gg.white
 		size:  int(10.0 * scale)
 		bold:  true
@@ -409,7 +445,8 @@ fn frame(mut app App) {
 	mute_label := if app.is_muted { 'UNMUTE' } else { 'MUTE' }
 	app.ctx.draw_rect_filled(side_x, mute_y, card_w, btn_h, mute_btn_color)
 	app.ctx.draw_rect_empty(side_x, mute_y, card_w, btn_h, gg.white)
-	app.ctx.draw_text(int(side_x + 10.0 * scale), int(mute_y + 10.0 * scale), mute_label, gg.TextCfg{
+	app.ctx.draw_text(int(side_x + 10.0 * scale), int(mute_y + 10.0 * scale), mute_label,
+		gg.TextCfg{
 		color: gg.white
 		size:  int(10.0 * scale)
 		bold:  true
@@ -424,12 +461,18 @@ fn frame(mut app App) {
 		app.ctx.draw_rect_empty(side_x, talon_y, card_w, card_h, gg.rgba(255, 255, 255, 70))
 	}
 
-	// Render Active Animations
+	// Render Active Animations and Sync Card Flip Audio Onset
 	mut active_anims := []Animation{}
-	for anim in app.animations {
+	for mut anim in app.animations {
 		if now < anim.start_time {
 			active_anims << anim
 			continue
+		}
+
+		// Trigger card flip sound exact frame animation starts moving on screen
+		if !anim.sound_played {
+			app.play_flip_sound()
+			anim.sound_played = true
 		}
 
 		elapsed := f32(now - anim.start_time)
@@ -455,14 +498,14 @@ fn frame(mut app App) {
 		app.ctx.draw_rect_filled(bx, by, banner_w, banner_h, gg.rgba(0, 0, 0, 210))
 		app.ctx.draw_rect_empty(bx, by, banner_w, banner_h, gg.rgb(255, 215, 0))
 
-		app.ctx.draw_text(int(bx + 40.0 * scale), int(by + 20.0 * scale),
-			'CONGRATULATIONS! YOU WON!', gg.TextCfg{
+		app.ctx.draw_text(int(bx + 40.0 * scale), int(by + 20.0 * scale), 'CONGRATULATIONS! YOU WON!',
+			gg.TextCfg{
 			color: gg.yellow
 			size:  int(18.0 * scale)
 			bold:  true
 		})
-		app.ctx.draw_text(int(bx + 90.0 * scale), int(by + 55.0 * scale),
-			'Completed in ${app.move_count} moves.', gg.TextCfg{
+		app.ctx.draw_text(int(bx + 90.0 * scale), int(by + 55.0 * scale), 'Completed in ${app.move_count} moves.',
+			gg.TextCfg{
 			color: gg.white
 			size:  int(13.0 * scale)
 		})
@@ -475,7 +518,8 @@ fn frame(mut app App) {
 	app.ctx.draw_rect_empty(0, bar_y, f32(win_w), bar_h, gg.rgba(255, 255, 255, 50))
 
 	moves_right_x := f32(win_w) - 120.0 * scale
-	app.ctx.draw_text(int(moves_right_x), int(bar_y + 7.0 * scale), 'MOVES: ${app.move_count}', gg.TextCfg{
+	app.ctx.draw_text(int(moves_right_x), int(bar_y + 7.0 * scale), 'MOVES: ${app.move_count}',
+		gg.TextCfg{
 		color: gg.white
 		size:  int(12.0 * scale)
 		bold:  true
@@ -485,7 +529,7 @@ fn frame(mut app App) {
 }
 
 fn draw_card(mut app App, x int, y int, w f32, h f32, card Card, selected bool) {
-  key := card_texture_key(card.rank, card.suit)
+	key := card_texture_key(card.rank, card.suit)
 
 	if img := app.card_images[key] {
 		app.ctx.draw_image(f32(x), f32(y), w, h, &img)
@@ -555,8 +599,11 @@ fn on_click(x f32, y f32, button gg.MouseButton, mut app App) {
 			pile_len := app.grid[slot_idx].len
 
 			stack_w := card_w
-			stack_h := card_h + if pile_len > 1 { f32(pile_len -
-				1) * (f32(stack_offset_y) * scale) } else { 0.0 }
+			stack_h := card_h + if pile_len > 1 {
+				f32(pile_len - 1) * (f32(stack_offset_y) * scale)
+			} else {
+				0.0
+			}
 
 			if x >= gx_pos && x <= gx_pos + stack_w && y >= row_y && y <= row_y + stack_h {
 				app.handle_grid_click(r, c)
@@ -716,7 +763,6 @@ fn (mut app App) execute_move(from_r int, from_c int, to_r int, to_c int) {
 	app.move_count++
 	app.message = 'Moved card successfully.'
 
-	play_flip_sound_delayed(0, app.is_muted)
 	app.animate_card_move(moved_card, start_px, start_py, to_r, to_c, 0)
 	app.fill_empty_row4_slots()
 	app.check_win_condition()
@@ -730,7 +776,6 @@ fn (mut app App) fill_empty_row4_slots() {
 			card := app.deck.pop()
 			app.grid[slot_idx] << card
 
-			play_flip_sound_delayed(int(delay_offset), app.is_muted)
 			app.animate_deal_from_talon(card, 3, c, delay_offset)
 			delay_offset += 75.0
 
@@ -781,7 +826,6 @@ fn (mut app App) deal_from_talon() {
 			card := app.deck.pop()
 			app.grid[slot_idx] << card
 
-			play_flip_sound_delayed(int(delay_offset), app.is_muted)
 			app.animate_deal_from_talon(card, 3, c, delay_offset)
 			delay_offset += 75.0
 
@@ -792,3 +836,48 @@ fn (mut app App) deal_from_talon() {
 	app.message = 'Dealt ${dealt} card(s) across Row 4 slots.'
 	app.check_win_condition()
 }
+
+// Background thread callback mixing active PCM sound stream instances
+fn audio_stream_callback(buffer &f32, num_frames int, num_channels int, user_data voidptr) {
+	mut player := unsafe { &WavPlayer(user_data) }
+	num_samples := num_frames * num_channels
+
+	unsafe {
+		mut buf := buffer
+		// Clear audio buffer
+		for i in 0 .. num_samples {
+			buf[i] = 0.0
+		}
+
+		// Mix samples for all active voices
+		mut remaining_positions := []int{}
+		for pos in player.active_pos {
+			mut cur_pos := pos
+			for i in 0 .. num_samples {
+				if cur_pos < player.samples.len {
+					buf[i] += player.samples[cur_pos]
+					cur_pos++
+				} else {
+					break
+				}
+			}
+
+			// Keep voice in active list if sound isn't complete yet
+			if cur_pos < player.samples.len {
+				remaining_positions << cur_pos
+			}
+		}
+		player.active_pos = remaining_positions
+	}
+}
+
+// Queues a new card flip sound instance into the active audio stream
+fn (mut app App) play_flip_sound() {
+	if app.is_muted {
+		return
+	}
+	if mut player := app.card_flip {
+		player.active_pos << 0
+	}
+}
+
