@@ -3,11 +3,8 @@ module main
 import gg
 import rand
 import time
-import os
-
 import sokol.audio
-import sokol.gfx
-
+import v.embed_file
 
 // Default card dimensions (500x726)
 const default_card_width = 500
@@ -96,12 +93,16 @@ mut:
 	last_click_r    int = -1
 	last_click_c    int = -1
 
-	// Card texture assets map: key = "2_of_clubs", value = gg.Image
-	card_images   map[string]gg.Image
-	card_back_img gg.Image
+	card_atlas gg.Image
 }
 
 fn main() {
+	// Embed the card atlas image binary directly into the compiled executable
+	embedded_atlas := $embed_file('PNG-cards-1.3/card_atlas.png')
+
+	// Embed the card flip sound binary directly into the compiled executable
+  embedded_card_flip_sound := $embed_file('sounds/card_flip.wav')
+
 	mut app := &App{}
 
 	app.ctx = gg.new_context(
@@ -109,7 +110,25 @@ fn main() {
 		width:        default_width
 		height:       default_height
 		window_title: 'Mod3 Solitaire'
-		init_fn:      init_app
+		init_fn:      fn [embedded_atlas, embedded_card_flip_sound] (mut app App) {
+			// Initialize card images directly from embedded binary data
+			app.card_atlas = use_card_atlas(mut app.ctx, embedded_atlas)
+
+			// Initialize card flip sound directly from embedded binary data
+      if player := use_card_flip_sound(embedded_card_flip_sound) {
+				app.card_flip = player
+
+				// Setup audio stream once globally during startup
+				audio.setup(
+					sample_rate:        44100
+					num_channels:       2
+					stream_userdata_cb: audio_stream_callback
+					user_data:          voidptr(player)
+				)
+			}
+
+			app.new_game()
+		}
 		frame_fn:     frame
 		click_fn:     on_click
 		user_data:    app
@@ -118,61 +137,16 @@ fn main() {
 	app.ctx.run()
 }
 
-// Convert card rank integer and Suit enum into filename stem
-fn card_texture_key(rank int, suit Suit) string {
-	suit_str := match suit {
-		.hearts { 'hearts' }
-		.diamonds { 'diamonds' }
-		.clubs { 'clubs' }
-		.spades { 'spades' }
+// use_card_atlas creates a gg.Image directly from an embedded file buffer
+fn use_card_atlas(mut ctx gg.Context, embedded_file embed_file.EmbedFileData) gg.Image {
+	bytes := embedded_file.to_bytes()
+	return ctx.create_image_from_byte_array(bytes, gg.ImageConfig{}) or {
+		panic('Failed to load card atlas texture from embedded file: ${err}')
 	}
-
-	rank_str := match rank {
-		11 { 'jack' }
-		12 { 'queen' }
-		13 { 'king' }
-		else { rank.str() }
-	}
-
-	return '${rank_str}_of_${suit_str}'
 }
 
-// Startup initialization: load card back & face PNG textures once, then start game
-fn init_app(mut app App) {
-	app.card_back_img = app.ctx.create_image('PNG-cards-1.3/card_back.png') or {
-		panic('Warning: Could not load card_back.png from PNG-cards-1.3/')
-	}
-  gfx.destroy_sampler(app.card_back_img.ssmp)
-
-	suits := [Suit.hearts, Suit.diamonds, Suit.clubs, Suit.spades]
-	for s in suits {
-		for r in 2 .. 14 {
-			key := card_texture_key(r, s)
-			file_path := 'PNG-cards-1.3/${key}.png'
-			app.card_images[key] = app.ctx.create_image(file_path) or {
-				panic('Warning: Could not load texture at ${file_path}')
-			}
-		  unsafe { gfx.destroy_sampler(app.card_images[key].ssmp) }
-    }
-	}
-
-	if player := load_card_flip_sound('sounds/card_flip.wav') {
-		app.card_flip = player
-
-		// Setup audio stream once globally during startup
-		audio.setup(
-			sample_rate:        44100
-			num_channels:       2
-			stream_userdata_cb: audio_stream_callback
-			user_data:          voidptr(player)
-		)
-	}
-
-	app.new_game()
-}
-
-fn load_card_flip_sound(filepath string) ?&WavPlayer {
-	bytes := os.read_bytes(filepath) or { return none }
+fn use_card_flip_sound(embedded_file embed_file.EmbedFileData) ?&WavPlayer {
+	bytes := embedded_file.to_bytes()
 
 	// Extract the raw PCM frames bypassing the 44-byte RIFF header
 	data_offset := 44
@@ -335,7 +309,7 @@ fn (mut app App) undo_last_move() {
 	app.selected_r = -1
 	app.selected_c = -1
 
-  app.play_flip_sound()
+	app.play_flip_sound()
 }
 
 fn frame(mut app App) {
@@ -460,7 +434,21 @@ fn frame(mut app App) {
 	// Talon Deck
 	talon_y := start_y_f + 3.0 * (card_h + card_m + 35.0 * scale)
 	if app.deck.len > 0 {
-		app.ctx.draw_image(side_x, talon_y, card_w, card_h, &app.card_back_img)
+		app.ctx.draw_image_with_config(gg.DrawImageConfig{
+			img:       &app.card_atlas
+			img_rect:  gg.Rect{
+				x:      side_x
+				y:      talon_y
+				width:  card_w
+				height: card_h
+			}
+			part_rect: gg.Rect{
+				x:      0
+				y:      f32(4 * default_card_height) // Row 4 holds the Card Back
+				width:  f32(default_card_width)
+				height: f32(default_card_height)
+			}
+		})
 		app.ctx.draw_rect_empty(side_x, talon_y, card_w, card_h, gg.black)
 	} else {
 		app.ctx.draw_rect_empty(side_x, talon_y, card_w, card_h, gg.rgba(255, 255, 255, 70))
@@ -534,14 +522,44 @@ fn frame(mut app App) {
 }
 
 fn draw_card(mut app App, x int, y int, w f32, h f32, card Card, selected bool) {
-	key := card_texture_key(card.rank, card.suit)
+	// Base sub-image size within atlas
+	src_w := f32(default_card_width)
+	src_h := f32(default_card_height)
 
-	if img := app.card_images[key] {
-		app.ctx.draw_image(f32(x), f32(y), w, h, &img)
-	} else {
-		app.ctx.draw_rect_filled(f32(x), f32(y), w, h, gg.white)
+	// Determine atlas row according to atlas layout:
+	// 0: Hearts, 1: Diamonds, 2: Spades, 3: Clubs
+	row_idx := match card.suit {
+		.hearts { 0 }
+		.diamonds { 1 }
+		.spades { 2 }
+		.clubs { 3 }
 	}
 
+	// Determine atlas column (2..13 -> col 0..11, Ace/14 -> col 12)
+	col_idx := if card.rank == 14 { 12 } else { card.rank - 2 }
+
+	// Calculate pixel offsets within the atlas
+	src_x := f32(col_idx) * src_w
+	src_y := f32(row_idx) * src_h
+
+	// Render the card using sub-rectangle parameters
+	app.ctx.draw_image_with_config(gg.DrawImageConfig{
+		img:       &app.card_atlas
+		img_rect:  gg.Rect{
+			x:      f32(x)
+			y:      f32(y)
+			width:  w
+			height: h
+		}
+		part_rect: gg.Rect{
+			x:      src_x
+			y:      src_y
+			width:  src_w
+			height: src_h
+		}
+	})
+
+	// Render selection or standard outline border
 	if selected {
 		app.ctx.draw_rect_empty(f32(x), f32(y), w, h, gg.rgb(255, 140, 0))
 		app.ctx.draw_rect_empty(f32(x + 1), f32(y + 1), w - 2.0, h - 2.0, gg.rgb(255, 200, 0))
@@ -885,4 +903,3 @@ fn (mut app App) play_flip_sound() {
 		player.active_pos << 0
 	}
 }
-
