@@ -1,10 +1,13 @@
 module main
 
-import sokol.audio
 import gg
 import rand
 import time
 import os
+
+import sokol.audio
+import sokol.gfx
+
 
 // Default card dimensions (500x726)
 const default_card_width = 500
@@ -139,6 +142,7 @@ fn init_app(mut app App) {
 	app.card_back_img = app.ctx.create_image('PNG-cards-1.3/card_back.png') or {
 		panic('Warning: Could not load card_back.png from PNG-cards-1.3/')
 	}
+  gfx.destroy_sampler(app.card_back_img.ssmp)
 
 	suits := [Suit.hearts, Suit.diamonds, Suit.clubs, Suit.spades]
 	for s in suits {
@@ -148,7 +152,8 @@ fn init_app(mut app App) {
 			app.card_images[key] = app.ctx.create_image(file_path) or {
 				panic('Warning: Could not load texture at ${file_path}')
 			}
-		}
+		  unsafe { gfx.destroy_sampler(app.card_images[key].ssmp) }
+    }
 	}
 
 	if player := load_card_flip_sound('sounds/card_flip.wav') {
