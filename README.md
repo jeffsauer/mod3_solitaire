@@ -21,5 +21,15 @@ Then, just run the executable:
 ./mod3
 ```
 
+## NOTES
 
+When compiled, the card images and sounds are embedded into the executable.  So, the executable should be self contained.
 
+However, on macOS, I haven't been able to figure out how to statically link in the garbage collection library.  Best I could come up with is to install the Boehm gargage collector via homebrew, and then make sure homebrew's lib directory is in your library path:
+
+```
+brew install bdw-gc
+export DYLD_LIBRARY_PATH="/opt/homebrew/lib:$DYLD_LIBRARY_PATH"
+```
+
+This is only needed if your are simply distributing the executable to other machines.  If you build on that machine, the v toolchain already includes the needed libraries.
