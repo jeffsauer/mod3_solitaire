@@ -49,6 +49,17 @@ mut:
 	rank int // 2-10, 11=J, 12=Q, 13=K
 }
 
+// Tracks physics state for cards during the victory sequence
+struct VictoryCard {
+mut:
+	card   Card
+	x      f32
+	y      f32
+	vx     f32
+	vy     f32
+	active bool
+}
+
 // Snapshot for UNDO functionality
 struct UndoState {
 	deck       []Card
@@ -88,6 +99,8 @@ mut:
 	is_muted   bool
 	card_flip  ?&WavPlayer
 
+	victory_cards []VictoryCard
+
 	// Double-click tracking state
 	last_click_time i64
 	last_click_r    int = -1
@@ -101,7 +114,7 @@ fn main() {
 	embedded_atlas := $embed_file('PNG-cards-1.3/card_atlas.png')
 
 	// Embed the card flip sound binary directly into the compiled executable
-  embedded_card_flip_sound := $embed_file('sounds/card_flip.wav')
+	embedded_card_flip_sound := $embed_file('sounds/card_flip.wav')
 
 	mut app := &App{}
 
@@ -115,7 +128,7 @@ fn main() {
 			app.card_atlas = use_card_atlas(mut app.ctx, embedded_atlas)
 
 			// Initialize card flip sound directly from embedded binary data
-      if player := use_card_flip_sound(embedded_card_flip_sound) {
+			if player := use_card_flip_sound(embedded_card_flip_sound) {
 				app.card_flip = player
 
 				// Setup audio stream once globally during startup
@@ -180,6 +193,7 @@ fn (mut app App) new_game() {
 	app.deck.clear()
 	app.undo_stack.clear()
 	app.animations.clear()
+	app.victory_cards.clear()
 	app.move_count = 0
 	app.is_won = false
 	app.selected_r = -1
@@ -480,6 +494,48 @@ fn frame(mut app App) {
 		}
 	}
 	app.animations = active_anims.clone()
+
+	// --- Victory Animation processing ---
+	if app.is_won {
+		gravity := f32(0.6) * scale
+		dampening := f32(0.85)
+		for mut vc in app.victory_cards {
+			if !vc.active {
+				// Keep drawing cards that have settled
+				draw_card(mut app, int(vc.x), int(vc.y), card_w, card_h, vc.card, false)
+				continue
+			}
+
+			// Apply gravity and velocity
+			vc.vy += gravity
+			vc.x += vc.vx
+			vc.y += vc.vy
+
+			// Floor bounce
+			if vc.y + card_h > f32(win_h) {
+				vc.y = f32(win_h) - card_h
+				vc.vy = -vc.vy * dampening
+				// Deactivate card to save cycles if energy is very low
+				if vc.vy > -1.0 * scale {
+					vc.vy = 0
+					vc.vx = 0
+					vc.active = false
+				}
+			}
+			
+			// Wall bounce (left/right)
+			if vc.x < 0 {
+				vc.x = 0
+				vc.vx = -vc.vx * dampening
+			} else if vc.x + card_w > f32(win_w) {
+				vc.x = f32(win_w) - card_w
+				vc.vx = -vc.vx * dampening
+			}
+
+			draw_card(mut app, int(vc.x), int(vc.y), card_w, card_h, vc.card, false)
+		}
+	}
+	// --- End of Victory Animation processing ---
 
 	// Victory Banner
 	if app.is_won {
@@ -830,7 +886,48 @@ fn (mut app App) check_win_condition() {
 
 	app.is_won = true
 	app.message = 'YOU WIN! All target sequences are complete!'
+	app.trigger_victory_animation()
 }
+
+// New function to initialize the physics for all cards
+fn (mut app App) trigger_victory_animation() {
+	scale := get_scale(app.ctx)
+	card_w := f32(card_width) * scale
+	card_h := f32(card_height) * scale
+	card_m := f32(card_margin) * scale
+	start_x_f := f32(start_x) * scale
+	start_y_f := f32(start_y) * scale
+
+	app.victory_cards.clear()
+
+	for r in 0 .. 4 {
+		for c in 0 .. cols {
+			slot_idx := r * cols + c
+			for i, card in app.grid[slot_idx] {
+				base_x := start_x_f + f32(c) * (card_w + card_m)
+				row_y := start_y_f + f32(r) * (card_h + card_m + 35.0 * scale)
+				cx := base_x + f32(i) * (f32(stack_offset_x) * scale)
+				cy := row_y + f32(i) * (f32(stack_offset_y) * scale)
+
+				// Assign random velocities for an explosion effect
+				vx := (rand.f32() * 16.0 - 8.0) * scale
+				vy := (rand.f32() * -15.0 - 5.0) * scale
+
+				app.victory_cards << VictoryCard{
+					card: card
+					x: cx
+					y: cy
+					vx: vx
+					vy: vy
+					active: true
+				}
+			}
+			// Clear the grid pile so static cards aren't drawn anymore
+			app.grid[slot_idx].clear()
+		}
+	}
+}
+
 
 fn (mut app App) deal_from_talon() {
 	if app.deck.len == 0 {
@@ -903,3 +1000,4 @@ fn (mut app App) play_flip_sound() {
 		player.active_pos << 0
 	}
 }
+
