@@ -107,6 +107,11 @@ mut:
 	last_click_c    int = -1
 
 	card_atlas gg.Image
+
+	// Solver state tracking
+	solver_status  string = 'Solver: Unknown'
+	solver_version int
+	solver_chan    chan string
 }
 
 fn main() {
@@ -116,7 +121,9 @@ fn main() {
 	// Embed the card flip sound binary directly into the compiled executable
 	embedded_card_flip_sound := $embed_file('sounds/card_flip.wav')
 
-	mut app := &App{}
+	mut app := &App{
+		solver_chan: chan string{cap: 10}
+	}
 
 	app.ctx = gg.new_context(
 		bg_color:     gg.rgb(34, 112, 62)
@@ -236,6 +243,7 @@ fn (mut app App) new_game() {
 	}
 
 	app.deck = temp_deck
+	app.update_solver_status()
 }
 
 fn get_scale(ctx &gg.Context) f32 {
@@ -324,9 +332,23 @@ fn (mut app App) undo_last_move() {
 	app.selected_c = -1
 
 	app.play_flip_sound()
+	app.update_solver_status()
 }
 
 fn frame(mut app App) {
+	// --- Check Solver Channel safely for async updates ---
+	mut solver_msg := ''
+	if app.solver_chan.try_pop(mut solver_msg) == .success {
+		parts := solver_msg.split(':')
+		if parts.len >= 2 {
+			version := parts[0].int()
+			if version == app.solver_version {
+				// Rejoin in case of extra colons in message string
+				app.solver_status = parts[1..].join(':')
+			}
+		}
+	}
+
 	app.ctx.begin()
 
 	win_w := app.ctx.width
@@ -566,6 +588,14 @@ fn frame(mut app App) {
 	app.ctx.draw_rect_filled(0, bar_y, f32(win_w), bar_h, gg.rgb(20, 70, 38))
 	app.ctx.draw_rect_empty(0, bar_y, f32(win_w), bar_h, gg.rgba(255, 255, 255, 50))
 
+	// Status Tracker Display
+	app.ctx.draw_text(int(start_x_f), int(bar_y + 7.0 * scale), app.solver_status,
+		gg.TextCfg{
+		color: gg.rgb(200, 200, 200)
+		size:  int(12.0 * scale)
+		bold:  true
+	})
+
 	moves_right_x := f32(win_w) - 120.0 * scale
 	app.ctx.draw_text(int(moves_right_x), int(bar_y + 7.0 * scale), 'MOVES: ${app.move_count}',
 		gg.TextCfg{
@@ -708,9 +738,6 @@ fn (app App) is_valid_move(card Card, to_r int, to_c int) bool {
 	}
 
 	// If the slot is empty, it can only accept the base card for this row:
-	// Row 1 (to_r = 0) -> 2
-	// Row 2 (to_r = 1) -> 3
-	// Row 3 (to_r = 2) -> 4
 	if dest_pile.len == 0 {
 		return card.rank == (2 + to_r)
 	}
@@ -845,6 +872,8 @@ fn (mut app App) execute_move(from_r int, from_c int, to_r int, to_c int) {
 	app.animate_card_move(moved_card, start_px, start_py, to_r, to_c, 0)
 	app.fill_empty_row4_slots()
 	app.check_win_condition()
+	
+	app.update_solver_status()
 }
 
 fn (mut app App) fill_empty_row4_slots() {
@@ -928,7 +957,6 @@ fn (mut app App) trigger_victory_animation() {
 	}
 }
 
-
 fn (mut app App) deal_from_talon() {
 	if app.deck.len == 0 {
 		app.message = 'Talon is empty!'
@@ -955,6 +983,8 @@ fn (mut app App) deal_from_talon() {
 
 	app.message = 'Dealt ${dealt} card(s) across Row 4 slots.'
 	app.check_win_condition()
+	
+	app.update_solver_status()
 }
 
 // Background thread callback mixing active PCM sound stream instances
@@ -999,5 +1029,197 @@ fn (mut app App) play_flip_sound() {
 	if mut player := app.card_flip {
 		player.active_pos << 0
 	}
+}
+
+
+// --- KDE KPat Bounded DFS Solver Implementation ---
+// Explores the state space limit off the main thread to predict solvability
+
+struct FastState {
+mut:
+	grid [32][]Card
+	deck []Card
+}
+
+fn hash_fast_state(state &FastState) u64 {
+	mut h := u64(state.deck.len)
+	for i in 0 .. 32 {
+		h ^= u64(i) * 0x9e3779b97f4a7c15
+		for j, card in state.grid[i] {
+			val := (u64(card.suit) << 8) | u64(card.rank)
+			h ^= val * u64(j + 1) * 0x85ebca6b
+			h = (h << 13) | (h >> 51)
+		}
+	}
+	return h
+}
+
+fn is_valid_pile_fast(pile []Card, r int) bool {
+	if pile.len == 0 { return true }
+	if pile.len > 4 { return false }
+	for i, c in pile {
+		expected := 2 + r + (i * 3)
+		if c.rank != expected { return false }
+		if i > 0 && c.suit != pile[i - 1].suit { return false }
+	}
+	return true
+}
+
+fn is_valid_move_fast(state &FastState, card Card, to_idx int) bool {
+	to_r := to_idx / 8
+	dest_pile := state.grid[to_idx]
+
+	if to_r == 3 { return dest_pile.len == 0 }
+	if dest_pile.len >= 4 { return false }
+	if dest_pile.len == 0 { return card.rank == (2 + to_r) }
+	
+	expected_rank := 2 + to_r + (dest_pile.len * 3)
+	if card.rank != expected_rank { return false }
+	
+	expected_prev_rank := 2 + to_r + ((dest_pile.len - 1) * 3)
+	top_card := dest_pile.last()
+	if top_card.rank != expected_prev_rank || top_card.suit != card.suit { return false }
+	
+	return true
+}
+
+fn is_won_fast(state &FastState) bool {
+	if state.deck.len > 0 { return false }
+	for i in 24 .. 32 {
+		if state.grid[i].len > 0 { return false }
+	}
+	for i in 0 .. 24 {
+		if state.grid[i].len != 4 { return false }
+	}
+	return true
+}
+
+fn clone_fast_state(state &FastState) FastState {
+	mut next := FastState{
+		deck: state.deck.clone()
+	}
+	for i in 0 .. 32 {
+		next.grid[i] = state.grid[i].clone()
+	}
+	return next
+}
+
+fn solve_state_algo(start_state FastState) int {
+	if is_won_fast(&start_state) {
+		return 1
+	}
+
+	mut visited := map[u64]bool{}
+	mut queue := []FastState{cap: 5000}
+	queue << start_state
+
+	mut states_explored := 0
+	max_states := 20000 // Safely abort to avoid memory overflow on very complex boards
+
+	for queue.len > 0 {
+		if states_explored > max_states {
+			return 0
+		}
+
+		curr := queue.pop()
+		states_explored++
+
+		hash := hash_fast_state(&curr)
+		if hash in visited {
+			continue
+		}
+		visited[hash] = true
+
+		if is_won_fast(&curr) {
+			return 1
+		}
+
+		// Simulate Grid moves
+		for from_idx in 0 .. 32 {
+			if curr.grid[from_idx].len == 0 { continue }
+			
+			// Pruning heuristic: Never undo a correctly placed sequence element
+			if from_idx < 24 {
+				r := from_idx / 8
+				if is_valid_pile_fast(curr.grid[from_idx], r) {
+					continue
+				}
+			}
+
+			top_card := curr.grid[from_idx].last()
+
+			for to_idx in 0 .. 32 {
+				if from_idx == to_idx { continue }
+				if is_valid_move_fast(&curr, top_card, to_idx) {
+					mut next_state := clone_fast_state(&curr)
+					moved := next_state.grid[from_idx].pop()
+					next_state.grid[to_idx] << moved
+					
+					// Replicate execute_move auto-filling free cell logic
+					for c in 0 .. 8 {
+						slot_idx := 24 + c
+						if next_state.grid[slot_idx].len == 0 && next_state.deck.len > 0 {
+							crd := next_state.deck.pop()
+							next_state.grid[slot_idx] << crd
+						}
+					}
+					
+					next_hash := hash_fast_state(&next_state)
+					if next_hash !in visited {
+						queue << next_state
+					}
+				}
+			}
+		}
+
+		// Simulate Talon deal
+		if curr.deck.len > 0 {
+			mut next_state := clone_fast_state(&curr)
+			for c in 0 .. 8 {
+				if next_state.deck.len > 0 {
+					slot_idx := 24 + c
+					card := next_state.deck.pop()
+					next_state.grid[slot_idx] << card
+				}
+			}
+			next_hash := hash_fast_state(&next_state)
+			if next_hash !in visited {
+				queue << next_state
+			}
+		}
+	}
+
+	return -1 // Explored all possible avenues, DEADLOCKED
+}
+
+// Triggers an async execution of the solver logic
+fn (mut app App) update_solver_status() {
+	if app.is_won {
+		app.solver_status = 'Solver: This game is winnable.'
+		return
+	}
+
+	app.solver_version++
+	app.solver_status = 'Solver: Calculating...'
+
+	mut state := FastState{
+		deck: app.deck.clone()
+	}
+	for i in 0 .. 32 {
+		state.grid[i] = app.grid[i].clone()
+	}
+
+	current_version := app.solver_version
+	ch := app.solver_chan
+
+	spawn fn (state FastState, version int, ch chan string) {
+		res := solve_state_algo(state)
+		status_msg := match res {
+			1 { 'Solver: This game is winnable.' }
+			-1 { 'Solver: This game is no longer winnable.' }
+			else { 'Solver: Unable to determine if this game is winnable.' }
+		}
+		ch <- '${version}:${status_msg}'
+	}(state, current_version, ch)
 }
 
