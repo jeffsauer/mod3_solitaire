@@ -21,6 +21,8 @@ Then, just run the executable:
 ./mod3
 ```
 
+Or, download the pre-compiled AppImage and install.
+
 ## NOTES
 
 When compiled, the card images and sounds are embedded into the executable.  So, the executable should be self contained.
