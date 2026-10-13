@@ -13,7 +13,7 @@ mkdir Development
 cd Development
 git clone https://github.com/jeffsauer/mod3_solitaire
 cd mod3_solitaire
-v mod3.v
+v -d sokol_wayland mod3.v
 ```
 
 Then, just run the executable:
