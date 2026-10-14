@@ -988,7 +988,7 @@ fn (mut app App) deal_from_talon() {
 }
 
 // Background thread callback mixing active PCM sound stream instances
-fn audio_stream_callback(buffer &f32, num_frames int, num_channels int, user_data voidptr) {
+fn audio_stream_callback(buffer &f32, num_frames i32, num_channels i32, user_data voidptr) {
 	mut player := unsafe { &WavPlayer(user_data) }
 	num_samples := num_frames * num_channels
 
