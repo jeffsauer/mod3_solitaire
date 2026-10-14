@@ -1,0 +1,37 @@
+# Builds the macOS .dmg (Mod3_Solitaire.app) on a GitHub-hosted Mac runner.
+#
+# Trigger: manually from the Actions tab, or automatically on version tags.
+# The finished .dmg is attached to the workflow run as an artifact.
+#
+# Note: macOS cannot be cross-compiled from Linux (V does not support it and
+# Apple's SDK is only licensed for Apple hardware), so this builds natively
+# on macOS CI instead.
+
+name: Build macOS DMG
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-dmg:
+    runs-on: macos-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install V
+        run: brew install vlang
+
+      - name: Build and package .dmg
+        run: |
+          chmod +x build_macos_dmg.sh
+          ./build_macos_dmg.sh
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Mod3_Solitaire-macos
+          path: Mod3_Solitaire.dmg
