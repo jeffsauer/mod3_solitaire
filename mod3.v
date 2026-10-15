@@ -767,7 +767,7 @@ fn on_click(x f32, y f32, button gg.MouseButton, mut app App) {
 
 	// Modal confirmation dialogs swallow all clicks while open
 	if app.show_confirm_dialog || app.show_quit_dialog {
-		_, yes_btn, no_btn := confirm_dialog_geoms(scale, app.ctx.width, app.ctx.height)
+		_, yes_btn, _ := confirm_dialog_geoms(scale, app.ctx.width, app.ctx.height)
 		if point_in_rect(x, y, yes_btn) {
 			is_quit := app.show_quit_dialog
 			app.show_confirm_dialog = false
@@ -1120,7 +1120,7 @@ fn (mut app App) deal_from_talon() {
 }
 
 // Background thread callback mixing active PCM sound stream instances
-fn audio_stream_callback(buffer &f32, num_frames i32, num_channels i32, user_data voidptr) {
+fn audio_stream_callback(buffer &f32, num_frames int, num_channels int, user_data voidptr) {
 	mut player := unsafe { &WavPlayer(user_data) }
 	num_samples := num_frames * num_channels
 
