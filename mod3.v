@@ -438,7 +438,7 @@ fn frame(mut app App) {
 	// Restart Button
 	restart_y := start_y_f
 	btn_h := 35.0 * scale
-	app.ctx.draw_rect_filled(side_x, restart_y, card_w, btn_h, gg.rgb(190, 50, 50))
+	app.ctx.draw_rect_filled(side_x, restart_y, card_w, btn_h, gg.rgb(60, 140, 200))
 	app.ctx.draw_rect_empty(side_x, restart_y, card_w, btn_h, gg.white)
 	app.ctx.draw_text(int(side_x + 6.0 * scale), int(restart_y + 10.0 * scale), 'NEW GAME',
 		gg.TextCfg{
@@ -449,7 +449,7 @@ fn frame(mut app App) {
 
 	// Undo Button
 	undo_y := restart_y + 45.0 * scale
-	undo_btn_color := if app.undo_stack.len > 0 { gg.rgb(60, 140, 200) } else { gg.rgb(70, 70, 70) }
+	undo_btn_color := if app.undo_stack.len > 0 { gg.rgb(190, 160, 30) } else { gg.rgb(70, 70, 70) }
 	app.ctx.draw_rect_filled(side_x, undo_y, card_w, btn_h, undo_btn_color)
 	app.ctx.draw_rect_empty(side_x, undo_y, card_w, btn_h, gg.white)
 	app.ctx.draw_text(int(side_x + 14.0 * scale), int(undo_y + 10.0 * scale), 'UNDO', gg.TextCfg{
@@ -460,7 +460,7 @@ fn frame(mut app App) {
 
 	// Mute Button
 	mute_y := undo_y + 45.0 * scale
-	mute_btn_color := if app.is_muted { gg.rgb(150, 60, 60) } else { gg.rgb(60, 120, 90) }
+	mute_btn_color := if app.is_muted { gg.rgb(75, 75, 75) } else { gg.rgb(120, 120, 120) }
 	mute_label := if app.is_muted { 'UNMUTE' } else { 'MUTE' }
 	app.ctx.draw_rect_filled(side_x, mute_y, card_w, btn_h, mute_btn_color)
 	app.ctx.draw_rect_empty(side_x, mute_y, card_w, btn_h, gg.white)
