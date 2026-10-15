@@ -112,6 +112,9 @@ mut:
 	solver_status  string = 'Solver: Unknown'
 	solver_version int
 	solver_chan    chan string
+
+	// "Are you sure?" confirmation dialog before dealing a new game
+	show_confirm_dialog bool
 }
 
 fn main() {
@@ -604,6 +607,56 @@ fn frame(mut app App) {
 		bold:  true
 	})
 
+	// New-game confirmation dialog (drawn last: modal overlay)
+	if app.show_confirm_dialog {
+		box, yes_btn, no_btn := confirm_dialog_geoms(scale, win_w, win_h)
+
+		// Dim everything behind the dialog
+		app.ctx.draw_rect_filled(0, 0, f32(win_w), f32(win_h), gg.rgba(0, 0, 0, 128))
+
+		// Dialog box
+		app.ctx.draw_rect_filled(box.x, box.y, box.w, box.h, gg.rgb(30, 77, 46))
+		app.ctx.draw_rect_empty(box.x, box.y, box.w, box.h, gg.white)
+
+		app.ctx.draw_text(int(box.x + 20.0 * scale), int(box.y + 26.0 * scale),
+			'Are you sure you want to', gg.TextCfg{
+			color: gg.white
+			size:  int(14.0 * scale)
+			bold:  true
+		})
+		app.ctx.draw_text(int(box.x + 20.0 * scale), int(box.y + 50.0 * scale), 'start a new game?',
+			gg.TextCfg{
+			color: gg.white
+			size:  int(14.0 * scale)
+			bold:  true
+		})
+		app.ctx.draw_text(int(box.x + 20.0 * scale), int(box.y + 74.0 * scale),
+			'Your current game will be lost.', gg.TextCfg{
+			color: gg.white
+			size:  int(12.0 * scale)
+		})
+
+		// YES button
+		app.ctx.draw_rect_filled(yes_btn.x, yes_btn.y, yes_btn.w, yes_btn.h, gg.rgb(190, 50, 50))
+		app.ctx.draw_rect_empty(yes_btn.x, yes_btn.y, yes_btn.w, yes_btn.h, gg.white)
+		app.ctx.draw_text(int(yes_btn.x + 24.0 * scale), int(yes_btn.y + 10.0 * scale), 'YES',
+			gg.TextCfg{
+			color: gg.white
+			size:  int(10.0 * scale)
+			bold:  true
+		})
+
+		// NO button
+		app.ctx.draw_rect_filled(no_btn.x, no_btn.y, no_btn.w, no_btn.h, gg.rgb(60, 140, 200))
+		app.ctx.draw_rect_empty(no_btn.x, no_btn.y, no_btn.w, no_btn.h, gg.white)
+		app.ctx.draw_text(int(no_btn.x + 28.0 * scale), int(no_btn.y + 10.0 * scale), 'NO',
+			gg.TextCfg{
+			color: gg.white
+			size:  int(10.0 * scale)
+			bold:  true
+		})
+	}
+
 	app.ctx.end()
 }
 
@@ -654,12 +707,51 @@ fn draw_card(mut app App, x int, y int, w f32, h f32, card Card, selected bool) 
 	}
 }
 
+// Geometry for the new-game confirmation dialog (shared by draw + click code)
+struct ConfirmRect {
+	x f32
+	y f32
+	w f32
+	h f32
+}
+
+fn confirm_dialog_geoms(scale f32, win_w int, win_h int) (ConfirmRect, ConfirmRect, ConfirmRect) {
+	box_w := 380.0 * scale
+	box_h := 200.0 * scale
+	bx := f32(win_w) / 2 - box_w / 2
+	by := f32(win_h) / 2 - box_h / 2
+	btn_w := 80.0 * scale
+	btn_h := 35.0 * scale
+	btn_y := by + box_h - btn_h - 25.0 * scale
+	yes_btn := ConfirmRect{bx + 70.0 * scale, btn_y, btn_w, btn_h}
+	no_btn := ConfirmRect{bx + box_w - 70.0 * scale - btn_w, btn_y, btn_w, btn_h}
+	return ConfirmRect{bx, by, box_w, box_h}, yes_btn, no_btn
+}
+
+fn point_in_rect(x f32, y f32, r ConfirmRect) bool {
+	return x >= r.x && x <= r.x + r.w && y >= r.y && y <= r.y + r.h
+}
+
 fn on_click(x f32, y f32, button gg.MouseButton, mut app App) {
 	if button != .left {
 		return
 	}
 
 	scale := get_scale(app.ctx)
+
+	// Modal confirmation dialog swallows all clicks while open
+	if app.show_confirm_dialog {
+		_, yes_btn, no_btn := confirm_dialog_geoms(scale, app.ctx.width, app.ctx.height)
+		if point_in_rect(x, y, yes_btn) {
+			app.show_confirm_dialog = false
+			app.new_game()
+		} else {
+			// NO button or clicking outside the dialog cancels
+			app.show_confirm_dialog = false
+		}
+		return
+	}
+
 	card_w := f32(card_width) * scale
 	card_h := f32(card_height) * scale
 	card_m := f32(card_margin) * scale
@@ -668,11 +760,11 @@ fn on_click(x f32, y f32, button gg.MouseButton, mut app App) {
 
 	side_x := start_x_f + f32(cols) * (card_w + card_m) + 20.0 * scale
 
-	// 1. Click New Game Button
+	// 1. Click New Game Button -> ask for confirmation first
 	restart_y := start_y_f
 	btn_h := 35.0 * scale
 	if x >= side_x && x <= side_x + card_w && y >= restart_y && y <= restart_y + btn_h {
-		app.new_game()
+		app.show_confirm_dialog = true
 		return
 	}
 
