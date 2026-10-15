@@ -113,8 +113,9 @@ mut:
 	solver_version int
 	solver_chan    chan string
 
-	// "Are you sure?" confirmation dialog before dealing a new game
+	// "Are you sure?" confirmation dialogs (new game / quit)
 	show_confirm_dialog bool
+	show_quit_dialog    bool
 }
 
 fn main() {
@@ -470,6 +471,16 @@ fn frame(mut app App) {
 		bold:  true
 	})
 
+	// Exit Button
+	exit_y := mute_y + 45.0 * scale
+	app.ctx.draw_rect_filled(side_x, exit_y, card_w, btn_h, gg.rgb(190, 50, 50))
+	app.ctx.draw_rect_empty(side_x, exit_y, card_w, btn_h, gg.white)
+	app.ctx.draw_text(int(side_x + 24.0 * scale), int(exit_y + 10.0 * scale), 'EXIT', gg.TextCfg{
+		color: gg.white
+		size:  int(10.0 * scale)
+		bold:  true
+	})
+
 	// Talon Deck
 	talon_y := start_y_f + 3.0 * (card_h + card_m + 35.0 * scale)
 	if app.deck.len > 0 {
@@ -607,8 +618,8 @@ fn frame(mut app App) {
 		bold:  true
 	})
 
-	// New-game confirmation dialog (drawn last: modal overlay)
-	if app.show_confirm_dialog {
+	// Confirmation dialogs (drawn last: modal overlay)
+	if app.show_confirm_dialog || app.show_quit_dialog {
 		box, yes_btn, no_btn := confirm_dialog_geoms(scale, win_w, win_h)
 
 		// Dim everything behind the dialog
@@ -618,23 +629,38 @@ fn frame(mut app App) {
 		app.ctx.draw_rect_filled(box.x, box.y, box.w, box.h, gg.rgb(30, 77, 46))
 		app.ctx.draw_rect_empty(box.x, box.y, box.w, box.h, gg.white)
 
-		app.ctx.draw_text(int(box.x + 20.0 * scale), int(box.y + 26.0 * scale),
-			'Are you sure you want to', gg.TextCfg{
-			color: gg.white
-			size:  int(14.0 * scale)
-			bold:  true
-		})
-		app.ctx.draw_text(int(box.x + 20.0 * scale), int(box.y + 50.0 * scale), 'start a new game?',
-			gg.TextCfg{
-			color: gg.white
-			size:  int(14.0 * scale)
-			bold:  true
-		})
-		app.ctx.draw_text(int(box.x + 20.0 * scale), int(box.y + 74.0 * scale),
-			'Your current game will be lost.', gg.TextCfg{
-			color: gg.white
-			size:  int(12.0 * scale)
-		})
+		if app.show_quit_dialog {
+			app.ctx.draw_text(int(box.x + 20.0 * scale), int(box.y + 26.0 * scale),
+				'Are you sure you want', gg.TextCfg{
+				color: gg.white
+				size:  int(14.0 * scale)
+				bold:  true
+			})
+			app.ctx.draw_text(int(box.x + 20.0 * scale), int(box.y + 50.0 * scale),
+				'to quit the program?', gg.TextCfg{
+				color: gg.white
+				size:  int(14.0 * scale)
+				bold:  true
+			})
+		} else {
+			app.ctx.draw_text(int(box.x + 20.0 * scale), int(box.y + 26.0 * scale),
+				'Are you sure you want to', gg.TextCfg{
+				color: gg.white
+				size:  int(14.0 * scale)
+				bold:  true
+			})
+			app.ctx.draw_text(int(box.x + 20.0 * scale), int(box.y + 50.0 * scale), 'start a new game?',
+				gg.TextCfg{
+				color: gg.white
+				size:  int(14.0 * scale)
+				bold:  true
+			})
+			app.ctx.draw_text(int(box.x + 20.0 * scale), int(box.y + 74.0 * scale),
+				'Your current game will be lost.', gg.TextCfg{
+				color: gg.white
+				size:  int(12.0 * scale)
+			})
+		}
 
 		// YES button
 		app.ctx.draw_rect_filled(yes_btn.x, yes_btn.y, yes_btn.w, yes_btn.h, gg.rgb(190, 50, 50))
@@ -739,15 +765,22 @@ fn on_click(x f32, y f32, button gg.MouseButton, mut app App) {
 
 	scale := get_scale(app.ctx)
 
-	// Modal confirmation dialog swallows all clicks while open
-	if app.show_confirm_dialog {
+	// Modal confirmation dialogs swallow all clicks while open
+	if app.show_confirm_dialog || app.show_quit_dialog {
 		_, yes_btn, no_btn := confirm_dialog_geoms(scale, app.ctx.width, app.ctx.height)
 		if point_in_rect(x, y, yes_btn) {
+			is_quit := app.show_quit_dialog
 			app.show_confirm_dialog = false
-			app.new_game()
+			app.show_quit_dialog = false
+			if is_quit {
+				app.ctx.quit()
+			} else {
+				app.new_game()
+			}
 		} else {
 			// NO button or clicking outside the dialog cancels
 			app.show_confirm_dialog = false
+			app.show_quit_dialog = false
 		}
 		return
 	}
@@ -783,14 +816,21 @@ fn on_click(x f32, y f32, button gg.MouseButton, mut app App) {
 		return
 	}
 
-	// 4. Click Talon
+	// 4. Click Exit Button -> ask for confirmation first
+	exit_y := mute_y + 45.0 * scale
+	if x >= side_x && x <= side_x + card_w && y >= exit_y && y <= exit_y + btn_h {
+		app.show_quit_dialog = true
+		return
+	}
+
+	// 5. Click Talon
 	talon_y := start_y_f + 3.0 * (card_h + card_m + 35.0 * scale)
 	if x >= side_x && x <= side_x + card_w && y >= talon_y && y <= talon_y + card_h {
 		app.deal_from_talon()
 		return
 	}
 
-	// 5. Click Grid Cards
+	// 6. Click Grid Cards
 	for r in 0 .. 4 {
 		row_y := start_y_f + f32(r) * (card_h + card_m + 35.0 * scale)
 
